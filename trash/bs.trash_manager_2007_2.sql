@@ -1,5 +1,5 @@
 create or replace
-PACKAGE  bs.TRASH_MANAGER_2007_2 AS
+PACKAGE          bs.TRASH_MANAGER_2007_2 AS
 
   /**
    * This is a new version of BS.BILL_MANAGER_2007 package. We've updated the later
@@ -21,8 +21,8 @@ PACKAGE  bs.TRASH_MANAGER_2007_2 AS
      (*) ProcedureB -- charge procedure used since 1-Oct-2007
 
      **) NOTE: when we say that ProcedureB is used since 1-Oct-2007 we mean
-        that we charged October using a new procedure, but procedure itself was
-     	 started in November, 2007 
+       that we charged October using a new procedure, but procedure itself was
+       started in November, 2007 
 
    */
 
@@ -226,7 +226,15 @@ CORR_START_DATE_2011 CONSTANT DATE := bs.bill_manager_2006.DATE_TRASH_JOIN;
  * required that current Resident/Soul mapping has the same ID.
  */
 CUM_RESIDENT_JAN2007 CONSTANT NUMBER  := 1;
-CUM_RESIDENT_MAR2011 CONSTANT NUMBER  := 39;
+CUM_RESIDENT_MAR2011 CONSTANT NUMBER  := 39; -- daketili suladoba
+----------------------------------------------------------------------------------------------------
+CUM_PERSON_COUNT CONSTANT NUMBER        :=  1; -- cveulebrivi suladoba
+CUR_CLOSED_PERSON_COUNT CONSTANT NUMBER := 39; -- daxurulta suladoba
+CUM_ORG_PERSON_COUNT CONSTANT NUMBER    := 38; -- organizaciis suladoba
+CUM_REFUGE_PERSON_COUNT CONSTANT NUMBER := 40; -- ltolvilis suldoba
+CUM_SOCIAL_PERSON_COUNT CONSTANT NUMBER := 41; -- soc. daucvelta suladoba
+CUM_SOCIAL_REFUGE_PERSON_COUNT CONSTANT NUMBER := 42; -- soc. daucveli ltolvilebis suladoba
+----------------------------------------------------------------------------------------------------
 
 /**
  * Default calculation hint.
@@ -251,7 +259,8 @@ NAME_PROCEDURE_B CONSTANT CHAR := 'B';
 /**
  * Minimum supported correction date.
  */
-MIN_CORRECTION_DATE CONSTANT DATE := '1-Jan-2007';
+--MIN_CORRECTION_DATE CONSTANT DATE := '1-Jan-2007';
+MIN_CORRECTION_DATE CONSTANT DATE := '1-JUN-2013';
 
 /**
  * Maximum supported correction date (need to be changed each month).
@@ -430,6 +439,9 @@ FUNCTION calc_standard_gel (
 --------------------------------------------------------------------------------
 -- Processing billing cycle
 --------------------------------------------------------------------------------
+
+PROCEDURE process_all(p_account NUMBER, p_itemdate DATE, p_schedule NUMBER);
+
 PROCEDURE process_not_cycle(p_account NUMBER, p_itemdate DATE);
 PROCEDURE process_cycle(p_account NUMBER, p_itemdate DATE, p_schedule NUMBER);
 FUNCTION has_subsidy_50_in_period (p_itemdate DATE, p_customer NUMBER, p_d1 DATE, p_d2 DATE) RETURN NUMBER;
@@ -444,10 +456,15 @@ PROCEDURE test_all;
 
 END TRASH_MANAGER_2007_2;
 
-//
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 create or replace
-PACKAGE BODY  TRASH_MANAGER_2007_2 AS
+PACKAGE BODY     bs.TRASH_MANAGER_2007_2 AS
 
 ------------------------------ Charging Utilities ------------------------------
 
@@ -824,14 +841,7 @@ BEGIN
       IF pContinue AND TRUNC(pD1) <= TRUNC(pD2)
       THEN
         pInterval := TRUNC(pD2) - TRUNC(pD1) + 1;
-
-        -- @since: 24-Aug-2011
-        IF rec.id IN (44, 40) AND pMonth.pFirst < '01-Jul-2011'
-        THEN
-          pGel := pInterval / pDaysInMonth * 2.5 * pCustomerDetailAmount;
-        ELSE
-          pGel := pInterval / pDaysInMonth * rec.monthly_traiff_val * pCustomerDetailAmount;
-        END IF;
+        pGel := pInterval / pDaysInMonth * rec.monthly_traiff_val * pCustomerDetailAmount;
 
         -- divide by 2 for January, residential category
         IF pMonth.pFirst = '1-Jan-2007' AND pCategoryUnitId = CUM_RESIDENT_JAN2007
@@ -839,8 +849,7 @@ BEGIN
           pGel := pGel / 2;
         END IF;
 
-        -- XXX: This was removed at 27/05/2008. They need zeros like other
-        -- (non-zero) charges.
+        -- XXX: This was removed in 27/05/2008. Zero charges should be given too.
         --IF ABS(pGel) >= MIN_GEL
         --THEN
           pCharge.pCoeffId := rec.ID;
@@ -857,7 +866,6 @@ BEGIN
       -- adjusting last-end-date for next step in loop
       pLastEndDate := pD2 + 1;
     END IF;
-
   END LOOP;
 
 END calcByCoeffDetailsB;
@@ -1493,11 +1501,10 @@ PROCEDURE calcMonthB (
   pCounter NUMBER;
   pCharge TP_CHARGE_DETAIL;
   pSubsidies TP_SUBSIDY_DETAILS;
+  l_amount NUMBER;
 BEGIN
 
   -- TODO: we need to add checking on intersection of residential/comercial categories
-
-  --dbms_output.put_line(pMonth.pFirst || '-' || pMonth.pLast);
 
   -- Loop over all categories in appropriate interval
   FOR rec IN (
@@ -1553,15 +1560,55 @@ BEGIN
         IF pContinue AND TRUNC(pD1) <= TRUNC(pD2)
         THEN
 
+          -- =======================================================================================
           -- calculate charge for given interval
+          -- =======================================================================================
           pCharges := NULL;
-          calcByCoeffDetailsB(det.cat_unit_id, det.amount, det.id, det.cat_unit_id, pD1, pD2, pMonth, pCharges);
+
+          IF det.amount > 4 AND det.cat_unit_id IN (
+            CUM_PERSON_COUNT, CUR_CLOSED_PERSON_COUNT, CUM_ORG_PERSON_COUNT, CUM_SOCIAL_PERSON_COUNT
+          ) THEN
+            l_amount := 4;
+          ELSE
+            l_amount := det.amount;
+          END IF;
+
+          -- unda semowmdes, xom ar gvaqvs kidev soc.suladoba!
+          -- soc. suladobis dros ar ericxeba
+          IF det.cat_unit_id IN (CUM_PERSON_COUNT, CUR_CLOSED_PERSON_COUNT)
+          THEN
+            DECLARE
+              l_social_amount NUMBER;
+            BEGIN
+              SELECT amount INTO l_social_amount
+              FROM bs.trash_cust_det
+              WHERE ((start_date <= pMonth.pFirst AND (end_date IS NULL OR end_date >= pMonth.pFirst))
+                OR ( start_date BETWEEN pMonth.pFirst AND pMonth.pLast )
+                OR (start_date <= pMonth.pLast AND (end_date IS NULL OR end_date >= pMonth.pLast)))
+                AND cat_unit_id = CUM_SOCIAL_PERSON_COUNT
+                AND customer_id = pCustomerId;
+              IF l_social_amount - 4 >= 0
+              THEN
+                l_amount := 0;
+              ELSIF l_amount >= (4 - l_social_amount)
+              THEN
+                l_amount := 4 - l_social_amount;
+              END IF;
+            EXCEPTION WHEN no_data_found
+            THEN
+              NULL;
+            END;
+          END IF;
+
+          calcByCoeffDetailsB(det.cat_unit_id, l_amount, det.id, det.cat_unit_id, pD1, pD2, pMonth, pCharges);
+
+          -- =======================================================================================
 
           -- append charge
           appendCharges(pCharges, pResults);
 
           -- calculate subsidy (for resident category only!)
-          IF pCharges IS NOT NULL AND rec.cat_unit_id = CUM_RESIDENT_JAN2007
+          /*IF pCharges IS NOT NULL AND rec.cat_unit_id = CUM_RESIDENT_JAN2007
           THEN
             -- initialize counter
             pCounter := 1;
@@ -1573,7 +1620,7 @@ BEGIN
               -- calculate appropriate subsidy
               pSubsidies := NULL;
               calcSubsidyB_2009(det.CUSTOMER_ID, pCharge, pSubsidies);
-              
+
               -- append subsidy
               IF pSubsidies IS NOT NULL
               THEN
@@ -1584,7 +1631,7 @@ BEGIN
               pCounter := pCounter + 1;
             END LOOP;
 
-          END IF;
+          END IF;*/
         END IF;
 
         -- last end date
@@ -1641,6 +1688,7 @@ PROCEDURE runRegularTrash_cust(
   pCharge TP_CHARGE_DETAIL;
   pSubsidy TP_SUBSIDY_DETAIL;
 BEGIN
+
   -- #1. calculate this month
   calcMonth(pCustomer, pMonth, HINT_DEFAULT, pResults);
 
@@ -1974,7 +2022,6 @@ PROCEDURE recalculationRoutine(
   l_next_tech_balance NUMBER;
   pEnd DATE;
 BEGIN
-
   IF pOnlySubsiy
   THEN
     DECLARE
@@ -3439,7 +3486,6 @@ BEGIN
     RETURN;
   END;
 
-
   -- A: loop on charges
 
   l_charge_total := 0;
@@ -3452,7 +3498,6 @@ BEGIN
     INNER JOIN bs.billoperation bop ON it.billoperkey = bop.billoperkey
     WHERE it.acckey = p_account AND it.itemkey > l_prev_cycle_last_item AND bop.trash_category = BOP_CATEGORY_CHARGE)
   LOOP
-
     IF
       (item.billoperkey = bill_manager_2006.OPER_PARENT_CHARGE OR
        item.itemnumber LIKE 'prnt%') AND
@@ -3485,6 +3530,7 @@ BEGIN
 
       --l_gel := ROUND( item.kwt * GEL_PER_KWH_2011 , 2 );
       l_gel := ROUND( calc_standard_gel(item.kwt, l_prev_cycle_last_itemdate, p_itemdate), 2 );
+
       INSERT INTO bs.trash_item_det (
         item_id, parent_item_id,
         amnt_in_gel, amnt_in_m3, kwh_item_id,
@@ -3501,6 +3547,10 @@ BEGIN
 
       l_charge_total := ROUND( l_charge_total + l_gel , 2 );
       l_charge_total_kwh := l_charge_total_kwh + item.kwt;
+      
+      
+      --dbms_output.put_line( item.kwt || ' --> ' || l_prev_cycle_last_itemdate || ' <> ' || p_itemdate || ' -- ' || l_gel  );
+      
     END IF;
   END LOOP;
 
@@ -3869,25 +3919,17 @@ BEGIN
   END IF;
 
   -- get account information
-  SELECT
-    custkey, mainaccount INTO l_customer, l_mainacc
-  FROM
-    bs.account
-  WHERE
-    acckey = p_account;
+  SELECT custkey, mainaccount INTO l_customer, l_mainacc FROM bs.account WHERE acckey = p_account;
 
 ---------------- TODO_1: remove this after JAN, 2013
-dimitri.trash_operation_131.process_customer(l_customer, p_itemdate);
+-- dimitri.trash_operation_131.process_customer(l_customer, p_itemdate);
 ---------------- END of TODO_1
 
   -- get trashcustomer status
   BEGIN
     SELECT status INTO l_status
     FROM bs.trashcustomer WHERE custkey = l_customer;
-    IF l_status = 3
-    THEN
-      RETURN;
-    END IF;
+    IF l_status = 3 THEN RETURN; END IF;
   EXCEPTION WHEN NO_DATA_FOUND
   THEN
     NULL;
@@ -3900,44 +3942,68 @@ dimitri.trash_operation_131.process_customer(l_customer, p_itemdate);
   -- SuqniSani, Sadrevani, wyalsaqaCi, tumbo, interneti, sabalanso
   -- IF l_billing_activity IN (175, 193, 22, 147, 208, 55)
   -- @since 22-Feb-2012 // remove 22 (wyalsaqaCi) from the list
-  IF l_billing_activity IN (175, 193, 147, 208, 55)
-  THEN
-    RETURN;
-  END IF;
+  -- @since 01-Jun-2013 --> comment
+--  IF l_billing_activity IN (175, 193, 147, 208, 55)
+--  THEN
+--    RETURN;
+--  END IF;
 
   -- get trash customer category
   l_category := get_customer_category(l_customer, l_billing_category);
 
-  -- A: commercial category
-  IF l_category = MONSUM_COMERCIAL_CATEGORY
-  THEN
+--  -- A: commercial category
+--  IF l_category = MONSUM_COMERCIAL_CATEGORY
+--  THEN
+--
+--    -- EXIT!!!
+--    -- if the given account is not a main account, then we should exit this procedure.
+--    -- only main account is charged when in comercial category.
+--    IF l_mainacc != 1 OR p_schedule IS NULL
+--    THEN
+--      RETURN;
+--    END IF;
+--
+--    -- process regular trash charge
+--    DECLARE
+--      l_month TP_MONTH;
+--    BEGIN
+--      getMonth(TRUNC(ADD_MONTHS(p_itemdate, -1)), l_month);
+--      runRegularTrash_cust(l_customer, l_month, p_itemdate);
+--    END;
+--
+--  -- B: residential category
+--  ELSIF l_category = MONSUM_RESIDENTIAL_CATEGORY
+--  THEN
+--
+--    IF l_billing_category != 1120
+--    THEN
+--      process_kwh_on_account(l_customer, p_account, p_itemdate, p_schedule);
+--    END IF;
+--
+--  END IF;
 
-    -- EXIT!!!
-    -- if the given account is not a main account, then we should exit this procedure.
-    -- only main account is charged when in comercial category.
-    IF l_mainacc != 1 OR p_schedule IS NULL
+  -- @since 01-Jun-2013 >>>
+
+  /*IF l_category = MONSUM_RESIDENTIAL_CATEGORY AND p_itemdate < '1-Jul-2013'
+  THEN 
+    IF l_billing_category != 1120 AND NVL(l_billing_activity, 0) NOT IN (175, 193, 147, 208, 55)
     THEN
-      RETURN;
+      process_kwh_on_account(l_customer, p_account, p_itemdate, p_schedule);
     END IF;
+  END IF;*/
 
-    -- process regular trash charge
+  -- @since 01-Aug-2013
+  IF l_mainacc = 1 AND p_schedule IS NOT NULL
+  --AND (p_itemdate >= '1-Jul-2013' OR l_category = MONSUM_COMERCIAL_CATEGORY)
+  THEN
     DECLARE
       l_month TP_MONTH;
     BEGIN
       getMonth(TRUNC(ADD_MONTHS(p_itemdate, -1)), l_month);
       runRegularTrash_cust(l_customer, l_month, p_itemdate);
     END;
-
-  -- B: residential category
-  ELSIF l_category = MONSUM_RESIDENTIAL_CATEGORY
-  THEN
-
-    IF l_billing_category != 1120
-    THEN
-      process_kwh_on_account(l_customer, p_account, p_itemdate, p_schedule);
-    END IF;
-
   END IF;
+  -- <<<
 
 END;
 
