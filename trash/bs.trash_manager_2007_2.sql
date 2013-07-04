@@ -1,7 +1,8 @@
-create or replace PACKAGE                TRASH_MANAGER_2007_2 AS
+create or replace
+PACKAGE  bs.TRASH_MANAGER_2007_2 AS
 
   /**
-   * This is a new version of BS.BILL_MANAGER_2007 package. We have updated the later
+   * This is a new version of BS.BILL_MANAGER_2007 package. We've updated the later
    * for two main reasons. First of all new billing procedures were proposed
    * and we added new functionality to the existing package. The second reason is
    * some slight problems in implementation of the old package, mainly these are
@@ -20,7 +21,7 @@ create or replace PACKAGE                TRASH_MANAGER_2007_2 AS
      (*) ProcedureB -- charge procedure used since 1-Oct-2007
 
      **) NOTE: when we say that ProcedureB is used since 1-Oct-2007 we mean
-     	 that we charged October using a new procedure, but procedure itself was
+        that we charged October using a new procedure, but procedure itself was
      	 started in November, 2007 
 
    */
@@ -191,6 +192,7 @@ OPER_CHARGE_CORRECTION CONSTANT NUMBER := 213;
  * subsidy operation.
  */
 OPER_SUBSIDY_50_PERCENT CONSTANT NUMBER := 221;
+OPER_SUBSIDY_50_PERCENT_2011 CONSTANT NUMBER := 220;
 
 /**
  * 100% subsidy operation code. Actully it is not used for the moment
@@ -215,14 +217,16 @@ OPER_SUBSIDY_CORRECTION CONSTANT NUMBER := 223;
  */
 OPER_CHARGE_CORR_AFTER_2011  CONSTANT NUMBER := 215;
 OPER_SUBSIDY_CORR_AFTER_2011 CONSTANT NUMBER := 227;
-CORR_START_DATE_2011 CONSTANT DATE := '1-Jan-2011';
-OLD_BALANCE_GE_0_OPERATION CONSTANT NUMBER := 300;
+OPER_SUBSIDY_CORR_MERIA CONSTANT NUMBER := 230;
+OLD_BALANCE_GE_0_OPERATION CONSTANT NUMBER   := 300;
+CORR_START_DATE_2011 CONSTANT DATE := bs.bill_manager_2006.DATE_TRASH_JOIN;
 
 /**
  * Category/unit mapping for Resident/Soul as it was in January 20007. It is not
  * required that current Resident/Soul mapping has the same ID.
  */
 CUM_RESIDENT_JAN2007 CONSTANT NUMBER  := 1;
+CUM_RESIDENT_MAR2011 CONSTANT NUMBER  := 39;
 
 /**
  * Default calculation hint.
@@ -252,7 +256,7 @@ MIN_CORRECTION_DATE CONSTANT DATE := '1-Jan-2007';
 /**
  * Maximum supported correction date (need to be changed each month).
  */
-MAX_CORRECTION_DATE CONSTANT DATE := '30-Jun-2011';
+--MAX_CORRECTION_DATE CONSTANT DATE := '31-Jul-2011';
 
 --------------------------- Monthly Summary Options ----------------------------
 
@@ -305,13 +309,26 @@ MONSUM_WARNING_CURRBAL_PROBLEM CONSTANT NUMBER  := 3;
  */
 MONSUM_WARNING_GEL_NOT_MATCH CONSTANT NUMBER  := 5;
 
+/**
+ * @since August, 2011
+ *
+ * Constant which indicates, how much should pay a residential trash customer
+ * per 1 kWh electricity consumption.
+ */
+GEL_PER_KWH_2011 CONSTANT NUMBER := 0.05;
+BOP_CATEGORY_CHARGE CONSTANT NUMBER := 1;
+BOP_CATEGORY_CORRECTION CONSTANT NUMBER := 2;
+BOP_CATEGORY_CORR_01NOV2012 CONSTANT NUMBER := 3;
+TARIFF_FROM_2012 CONSTANT DATE := '01-Nov-2012';
+--GEL_PER_KWH_2012 CONSTANT NUMBER := GEL_PER_KWH_2011 / 2;
+
 ------------------------------ Charging Utilities ------------------------------
 
 /**
  * Calculate normilized current balance value.
  */
-FUNCTION get_normalized_currbalance(pCustomerId NUMBER, pItemId NUMBER DEFAULT NULL) RETURN NUMBER;
-FUNCTION get_normalized_currbalance2(pCustomerId NUMBER) RETURN NUMBER;
+FUNCTION get_normalized_currbalance2(pCustomerId NUMBER, pItemId NUMBER DEFAULT NULL) RETURN NUMBER;
+
 /**
  * Creates TP_MONTH structure from date.
  */
@@ -372,13 +389,21 @@ PROCEDURE calculateExistingCharge(
   pSubsidyGel OUT NUMBER
 );
 
+PROCEDURE recalculationRoutine(
+  pCustomerId NUMBER,
+  pHint       NUMBER,
+  pOnlySubsiy BOOLEAN := FALSE,
+  pStart      DATE := MIN_CORRECTION_DATE /*,
+  pEnd        DATE := MAX_CORRECTION_DATE*/
+);
+
 /**
  * Recalculate.
  */
 PROCEDURE recalculate(
   pCustomerId NUMBER,
-  pStart      DATE := MIN_CORRECTION_DATE,
-  pEnd        DATE := MAX_CORRECTION_DATE
+  pOnlySubsiy BOOLEAN := FALSE,
+  pStart DATE := MIN_CORRECTION_DATE
 );
 
 /**
@@ -386,8 +411,8 @@ PROCEDURE recalculate(
  */
 PROCEDURE recalculateAndSendToItem(
   pCustomerId NUMBER,
-  pStart      DATE := MIN_CORRECTION_DATE,
-  pEnd        DATE := MAX_CORRECTION_DATE
+  pOnlySubsiy BOOLEAN := FALSE,
+  pStart DATE := MIN_CORRECTION_DATE
 );
 
 PROCEDURE recalculate_2010(pCustomerId NUMBER);
@@ -398,6 +423,16 @@ PROCEDURE recalculateAndSendToItem_2010(pCustomerId NUMBER);
  */
 PROCEDURE runTrashSummary (pReportingDate DATE);
 
+FUNCTION calc_standard_gel (
+  p_kwh NUMBER, p_start DATE, p_end DATE
+) RETURN NUMBER;
+
+--------------------------------------------------------------------------------
+-- Processing billing cycle
+--------------------------------------------------------------------------------
+PROCEDURE process_not_cycle(p_account NUMBER, p_itemdate DATE);
+PROCEDURE process_cycle(p_account NUMBER, p_itemdate DATE, p_schedule NUMBER);
+FUNCTION has_subsidy_50_in_period (p_itemdate DATE, p_customer NUMBER, p_d1 DATE, p_d2 DATE) RETURN NUMBER;
 --------------------------------------------------------------------------------
 -- Tests
 --------------------------------------------------------------------------------
@@ -408,9 +443,11 @@ PROCEDURE runTrashSummary (pReportingDate DATE);
 PROCEDURE test_all;
 
 END TRASH_MANAGER_2007_2;
-/
 
-create or replace PACKAGE BODY            TRASH_MANAGER_2007_2 AS
+//
+
+create or replace
+PACKAGE BODY  TRASH_MANAGER_2007_2 AS
 
 ------------------------------ Charging Utilities ------------------------------
 
@@ -430,262 +467,54 @@ IS
     trashsubsidyid DESC;
 
 ------------------------------ Trash Scheduling Calculations -------------------
+
 -- @since May, 2011
 
-
-/*FUNCTION month_schedule_date(pCustomerId NUMBER, pDate DATE)
-RETURN DATE
-IS
-  pStart   DATE;
-  pEnd     DATE;
-  pAccount NUMBER;
-  pSchedule NUMBER;
-  pScheduleDate DATE;
-  pBillDate DATE;
-BEGIN
-  pEnd := LAST_DAY(TRUNC(pDate));
-  pStart := LAST_DAY( add_months(TRUNC(pDate), -1) ) + 1;
-
-  BEGIN
-    SELECT acckey INTO pAccount FROM bs.account WHERE custkey = pCustomerId AND mainaccount = 1;
-  EXCEPTION WHEN no_data_found THEN
-    RETURN NULL; -- customer with no main account
-  END;
-
-  -- searching schedule information in given month
-
-  SELECT MAX(schedkey) INTO pSchedule
-  FROM bs.item
-  WHERE acckey = pAccount AND schedkey IS NOT NULL AND itemdate BETWEEN pStart AND pEnd;
-
-  IF pSchedule IS NOT NULL
-  THEN
-    SELECT cycledate INTO pScheduleDate FROM bs.schedule WHERE schedkey = pSchedule;
-    RETURN TRUNC(pScheduleDate);
-  END IF;
-
-  -- search bill_item for schedule date
-
-  --SELECT MAX(DATE) INTO pBillDate
-
-  -- schedule not found in this month: get last schedule date (from previous months)
-
-  SELECT MAX(schedkey) INTO pSchedule
-  FROM bs.item
-  WHERE acckey = pAccount AND schedkey IS NOT NULL AND itemdate < pStart;
-
-  IF pSchedule IS NOT NULL
-  THEN
-    SELECT cycledate INTO pScheduleDate FROM bs.schedule WHERE schedkey = pSchedule;
-    RETURN TRUNC(pScheduleDate);
-  END IF;
-
-  RETURN NULL;
-END month_schedule_date;*/
-
-/**
- * @pHint 
- *   0: normal
- *   1: main account not found
- *   2: future date, date too new
- *   3: schedule not found
- */
-PROCEDURE month_schedule_date(
-  pCustomerId   IN  NUMBER,
-  pDate         IN  DATE,
-  pScheduleDate OUT DATE,
-  pHint         OUT NUMBER
-) IS
-  l_account NUMBER;
-  l_start   DATE;
-  l_end     DATE;
-  l_curr_month BOOLEAN;
-  l_prev_month BOOLEAN;
-BEGIN
-  pHint := 0;
-  pScheduleDate := null;
-
-  -- getting main account information
-  BEGIN
-    SELECT acckey INTO l_account FROM bs.account WHERE custkey = pCustomerId AND mainaccount = 1;
-  EXCEPTION WHEN no_data_found THEN
-    pHint := 1; -- customer with no main account!!!
-    pScheduleDate := NULL;
-    RETURN;
-  END;
-
-  -- getting month information
-  l_end := LAST_DAY(TRUNC(pDate));
-  l_start := LAST_DAY( add_months(TRUNC(pDate), -1) ) + 1;
-  l_curr_month := ABS(LAST_DAY(TRUNC(sysdate)) - l_end) < 1;
-  l_prev_month := ABS(LAST_DAY( LAST_DAY( add_months(TRUNC(sysdate), - 2) ) + 1) - l_end) < 1;
-
-  -- date is a far future for proper processing
-  IF pDate > sysdate + 10
-  THEN
-    pHint := 2;
-    pScheduleDate := NULL;
-    RETURN;
-  END IF;
-
-  -- get current month information from schedule
-  IF l_curr_month OR l_prev_month
-  THEN
-    -- try to find schedule for this month
-    SELECT MAX(s.cycledate) INTO pScheduleDate
-    FROM
-      bs.schedule s inner join bs.routeacc ra on s.routekey = ra.routekey
-    WHERE
-      ra.acckey = l_account AND s.cycledate BETWEEN l_start AND l_end;
-    IF pScheduleDate IS NOT NULL
-    THEN
-      pHint := 0;
-      RETURN;
-    END IF;
-    -- current month schedule not yet generated: lookup previous month
-    DECLARE
-      l_prev_start DATE;
-      l_prev_end   DATE;
-    BEGIN
-      l_prev_end   := l_start - 1;
-      l_prev_start := LAST_DAY( add_months(TRUNC(pDate), -2) ) + 1;
-      SELECT MAX(s.cycledate) INTO pScheduleDate
-      FROM
-        bs.schedule s inner join bs.routeacc ra on s.routekey = ra.routekey
-      WHERE
-        ra.acckey = l_account AND s.cycledate BETWEEN l_prev_start AND l_prev_end;
-      IF pScheduleDate IS NOT NULL
-      THEN
-        pHint := 0;
-        RETURN;
-      END IF;
-    END;
-  END IF;
-/*
-  -- lookup in bill_item
-  SELECT MAX(billdate) INTO pScheduleDate
-  FROM bs.item_bill
-  WHERE acckey = l_account AND billdate BETWEEN l_start AND l_end;
-  IF pScheduleDate IS NOT NULL
-  THEN
-    pHint := 0;
-    RETURN;
-  END IF;
-*/
-/*  -- try use schedule again (MAX 60 days interval from now)
-  IF ABS(l_start - sysdate) < 90
-  THEN
-    SELECT MAX(s.cycledate) INTO pScheduleDate
-    FROM
-      bs.schedule s inner join bs.routeacc ra on s.routekey = ra.routekey
-    WHERE
-      ra.acckey = l_account AND s.cycledate BETWEEN l_start AND l_end;
-    IF pScheduleDate IS NOT NULL
-    THEN
-      pHint := 0;
-      RETURN;
-    END IF;
-  END IF;*/
-
-  -- no schedule found
-  pHint := 3;
-  pScheduleDate := NULL;
-END month_schedule_date;
-
-FUNCTION get_normalized_currbalance2(pCustomerId NUMBER)
+FUNCTION get_normalized_currbalance2(pCustomerId NUMBER, pItemId NUMBER DEFAULT NULL)
 RETURN NUMBER
 IS
   l_cut_date DATE;
   l_balance NUMBER;
 BEGIN
-  l_cut_date :=  last_day(add_months(sysdate, -3)) + 1;
-  SELECT curr_balance INTO l_balance FROM bs.trashcustomer WHERE custkey = pCustomerId;
+
+  IF pItemId IS NULL
+  THEN
+    l_cut_date :=  last_day(add_months(sysdate, -3)) + 1;
+    SELECT NVL(curr_balance, 0) INTO l_balance
+    FROM bs.trashcustomer WHERE custkey = pCustomerId;
+  ELSE
+    l_cut_date :=  '01-Jan-1980';
+    BEGIN
+      SELECT NVL(balance, 0) - NVL(old_balance, 0) INTO l_balance
+      FROM (SELECT balance, old_balance FROM bs.trashitem
+        WHERE trashitemid > pItemId AND custkey = pCustomerId
+        ORDER BY trashitemid) WHERE ROWNUM = 1;
+    EXCEPTION WHEN no_data_found
+    THEN
+      SELECT NVL(curr_balance, 0) INTO l_balance
+      FROM bs.trashcustomer WHERE custkey = pCustomerId;
+    END;
+  END IF;
+
   FOR item IN (
-    SELECT * FROM bs.trashitem WHERE custkey = pCustomerId AND enterdate > l_cut_date
+    SELECT * FROM bs.trashitem
+    WHERE
+      custkey = pCustomerId AND enterdate > l_cut_date AND trashitemid <= NVL(pItemId, 999999999999999)
     ORDER BY trashitemid DESC
   ) LOOP
     IF item.isprinted = 1
     THEN
       EXIT;
     END IF;
-    IF item.operationid IN (212, 215, 221, 222, 227)
+    IF item.operationid IN (212, 215, 220, 221, 222, 227)
     THEN
       l_balance := l_balance - normalizeGel(item.amount, item.operationid);
     END IF;
   END LOOP;
+
   RETURN l_balance;
+
 END;
-
-/**
- * Calculate normilized current balance.
- *
- * @param pCustomerId customer identificator
- * @param pItemId item identificator which should be calculated by this procedure;
- *                use <code>NULL</code> value when processing new operation
- */
-FUNCTION get_normalized_currbalance(pCustomerId NUMBER, pItemId NUMBER DEFAULT NULL)
-RETURN NUMBER
-IS
-  l_oper_date DATE;
-  l_sched_date DATE;
-  l_hint NUMBER;
-  l_curr_balance NUMBER;
-BEGIN
-
-  IF pItemId IS NULL
-  THEN
-    l_oper_date := TRUNC(sysdate);
-    SELECT curr_balance INTO l_curr_balance FROM bs.trashcustomer
-    WHERE custkey = pCustomerId;
-  ELSE
-    SELECT ENTERDATE INTO l_oper_date
-    FROM bs.trashitem WHERE trashitemid = pItemId;
-    BEGIN
-      SELECT ( balance - old_balance ) INTO l_curr_balance
-      FROM (SELECT balance, old_balance FROM bs.trashitem
-        WHERE custkey = pCustomerId AND trashitemid > pItemId
-        ORDER BY trashitemid ASC)
-      WHERE ROWNUM = 1;
-    EXCEPTION WHEN no_data_found
-    THEN
-      SELECT curr_balance INTO l_curr_balance FROM bs.trashcustomer
-      WHERE custkey = pCustomerId;
-    END;
-  END IF;
-
-  -- get schedule date for this month
-  month_schedule_date(pCustomerId, l_oper_date, l_sched_date, l_hint);
-
-  IF l_hint IN (1, 2, 3)
-  THEN
-    RETURN l_curr_balance;
-  END IF;
-
-  IF l_oper_date < l_sched_date
-  THEN
-    month_schedule_date(pCustomerId, ADD_MONTHS(l_oper_date, -1), l_sched_date, l_hint);
-    IF l_hint IN (1, 2, 3)
-    THEN
-      RETURN l_curr_balance;
-    END IF;
-  END IF;
-
-  -- move up until schedule date
-  FOR item IN (
-    SELECT * FROM trashitem
-    WHERE custkey = pCustomerId AND
-          enterdate > l_sched_date AND
-          trashitemid <= NVL(pItemId, 999999999999999)
-  ) LOOP
-    IF item.operationid IN (212, 215, 221, 222, 227)
-    THEN
-      l_curr_balance := l_curr_balance - normalizeGel(item.amount, item.operationid);
-    END IF;
-  END LOOP;
-
-  RETURN l_curr_balance;
-
-END get_normalized_currbalance;
 
 --------------------------------------------------------------------------------
 
@@ -967,6 +796,7 @@ PROCEDURE calcByCoeffDetailsB (
   pContinue BOOLEAN;
   pCharge TP_CHARGE_DETAIL;
 BEGIN
+
   -- adjusting start and end dates
   pNewStartDate := NVL(pStartDate, pMonth.pFirst);
   pNewEndDate := NVL(pEndDate, pMonth.pLast);
@@ -994,7 +824,14 @@ BEGIN
       IF pContinue AND TRUNC(pD1) <= TRUNC(pD2)
       THEN
         pInterval := TRUNC(pD2) - TRUNC(pD1) + 1;
-        pGel := pInterval / pDaysInMonth * rec.monthly_traiff_val * pCustomerDetailAmount;
+
+        -- @since: 24-Aug-2011
+        IF rec.id IN (44, 40) AND pMonth.pFirst < '01-Jul-2011'
+        THEN
+          pGel := pInterval / pDaysInMonth * 2.5 * pCustomerDetailAmount;
+        ELSE
+          pGel := pInterval / pDaysInMonth * rec.monthly_traiff_val * pCustomerDetailAmount;
+        END IF;
 
         -- divide by 2 for January, residential category
         IF pMonth.pFirst = '1-Jan-2007' AND pCategoryUnitId = CUM_RESIDENT_JAN2007
@@ -1188,11 +1025,11 @@ BEGIN
         THEN
           -- this case can not be calculated
           pGel := 0;
-        ELSIF det.operationid = OPER_SUBSIDY_50_PERCENT
+        ELSIF (det.operationid = OPER_SUBSIDY_50_PERCENT OR det.operationid = OPER_SUBSIDY_50_PERCENT)
           AND NVL(det.quantity, 0) > 0
         THEN
           pGel := -0.5 * pCharge.pGel * (pInterval/pFullInterval) * (pNewAmount/pCharge.pCustomerDetailAmount);
-        ELSIF det.operationid = OPER_SUBSIDY_50_PERCENT
+        ELSIF det.operationid = OPER_SUBSIDY_100_PERCENT
           AND NVL(det.quantity, 0) > 0
         THEN
           pGel := -1.0 * pCharge.pGel * (pInterval/pFullInterval) * (pNewAmount/pCharge.pCustomerDetailAmount);
@@ -1287,11 +1124,11 @@ BEGIN
         THEN
           -- this case can not be calculated
           pGel := 0;
-        ELSIF det.operationid = OPER_SUBSIDY_50_PERCENT
+        ELSIF (det.operationid = OPER_SUBSIDY_50_PERCENT OR det.operationid = OPER_SUBSIDY_50_PERCENT_2011)
           AND NVL(det.quantity, 0) > 0
         THEN
           pGel := -0.5 * pCharge.pGel * (pInterval/pFullInterval) * (pNewAmount/pCharge.pCustomerDetailAmount);
-        ELSIF det.operationid = OPER_SUBSIDY_50_PERCENT
+        ELSIF det.operationid = OPER_SUBSIDY_100_PERCENT
           AND NVL(det.quantity, 0) > 0
         THEN
           pGel := -1.0 * pCharge.pGel * (pInterval/pFullInterval) * (pNewAmount/pCharge.pCustomerDetailAmount);
@@ -1369,7 +1206,7 @@ BEGIN
     LOOP
       -- getting charge
       pCharge := pResult.pCharge(pCounter);
-      
+
       -- look for matching category/unit mapping id
       -- note that when cut.CAT_UNIT_ID IS NULL, then it can be applied for any category/unit mapping
       IF cut.CAT_UNIT_ID IS NULL OR cut.CAT_UNIT_ID = NVL(pCharge.pCustomerDetailCatUnitId, -1)
@@ -1602,7 +1439,7 @@ BEGIN
         -- calculate subsidy GEL charge
         pSubsidyCoeff := pPersonCount / pLastDetailAmount;
         pSubsidyGel := 0;
-        IF pSubsidyDetailRow.OPERATIONID = OPER_SUBSIDY_50_PERCENT
+        IF (pSubsidyDetailRow.OPERATIONID = OPER_SUBSIDY_50_PERCENT OR pSubsidyDetailRow.OPERATIONID = OPER_SUBSIDY_50_PERCENT_2011)
         THEN
           pSubsidyGel := -0.5 * pGel * pSubsidyCoeff;
         ELSIF pSubsidyDetailRow.OPERATIONID = OPER_SUBSIDY_100_PERCENT
@@ -1660,14 +1497,17 @@ BEGIN
 
   -- TODO: we need to add checking on intersection of residential/comercial categories
 
+  --dbms_output.put_line(pMonth.pFirst || '-' || pMonth.pLast);
+
   -- Loop over all categories in appropriate interval
   FOR rec IN (
     SELECT DISTINCT cat_unit_id
     FROM bs.trash_cust_det
     WHERE ((start_date <= pMonth.pFirst AND (end_date IS NULL OR end_date >= pMonth.pFirst))
+        OR ( start_date BETWEEN pMonth.pFirst AND pMonth.pLast )
         OR (start_date <= pMonth.pLast AND (end_date IS NULL OR end_date >= pMonth.pLast)))
       AND (
-        (pHint = HINT_DEFAULT AND status = 0) OR
+        (pHint = HINT_DEFAULT /*AND status = 0*/) OR -- STATUS = 0 waSlilia rusikos moTxovniT!!! (28-Sep-2011)
         (pHint = HINT_AS_VOUCHER /*any status is OK, when calculating as voucher*/)
       ) AND customer_id = pCustomerId
   ) LOOP
@@ -1681,6 +1521,7 @@ BEGIN
     FOR det IN (
       SELECT det.* FROM bs.trash_cust_det det, bs.trash_recalc_cust_det recalc_det
       WHERE ((start_date <= pMonth.pFirst AND (end_date IS NULL OR end_date >= pMonth.pFirst))
+        OR ( start_date BETWEEN pMonth.pFirst AND pMonth.pLast )
         OR (start_date <= pMonth.pLast AND (end_date IS NULL OR end_date >= pMonth.pLast)))
         AND det.customer_id = pCustomerId -- this customer
         AND det.cat_unit_id = rec.cat_unit_id -- this detail
@@ -1771,7 +1612,7 @@ BEGIN
 
   -- getting name of the procedure which should be used for the given month
   pProcedureName := getProcedureName(pMonth, pHint);
-  
+
   -- ProcedureA
   IF pProcedureName = NAME_PROCEDURE_A
   THEN
@@ -1786,6 +1627,123 @@ BEGIN
   END IF;
 
 END calcMonth;
+
+PROCEDURE runRegularTrash_cust(
+  pCustomer NUMBER,
+  pMonth TP_MONTH,
+  pItemDate  DATE
+) IS
+  pResults TP_CALC_RES;
+  pCounter NUMBER;
+  pSummaryGel NUMBER;
+  pNewItemId NUMBER;
+  pNewSubsidyItemId NUMBER;
+  pCharge TP_CHARGE_DETAIL;
+  pSubsidy TP_SUBSIDY_DETAIL;
+BEGIN
+  -- #1. calculate this month
+  calcMonth(pCustomer, pMonth, HINT_DEFAULT, pResults);
+
+  -- #2. append charge
+  IF pResults.pCharge IS NOT NULL AND pResults.pCharge.COUNT > 0
+  THEN
+    -- add header item
+    INSERT INTO bs.trashitem (operdate, enterdate, amount, custkey, operationid, isprinted)
+    VALUES (TRUNC(pItemDate), SYSDATE, 0, pCustomer, OPER_CHARGE, 0)
+    RETURNING trashitemid INTO pNewItemId;
+
+    -- adding details for the item
+    pCounter := 1;
+    pSummaryGel := 0;
+    WHILE pCounter <= pResults.pCharge.COUNT
+    LOOP
+      -- getting charge
+      pCharge := pResults.pCharge(pCounter);
+
+      -- inserting charge
+      --IF ABS(pCharge.pGel) >= MIN_GEL
+      --THEN
+        -- add detail record
+        INSERT INTO bs.trash_item_det (item_id, cat_coeff_id, start_date, end_date,
+          amnt_in_m3, amnt_in_gel, enter_date, cust_det_id)
+        VALUES (pNewItemId, pCharge.pCoeffId, pCharge.pStart, pCharge.pEnd,
+          0, ROUND (pCharge.pGel, 2), SYSDATE, pCharge.pCustomerDetailId);
+        -- make summary
+        pSummaryGel := pSummaryGel + ROUND(pCharge.pGel, 2);
+      --END IF;
+
+      -- next step
+      pCounter := pCounter + 1;
+    END LOOP;
+
+    -- update header and customer balance
+    IF ABS(pSummaryGel) >= MIN_GEL
+    THEN
+      UPDATE bs.trashitem
+        SET amount = ROUND(pSummaryGel, 2)
+      WHERE trashitemid = pNewItemId;
+
+      UPDATE bs.trashcustomer
+        SET balance = balance + ROUND(pSummaryGel, 2),
+          curr_balance = curr_balance + ROUND(pSummaryGel, 2)
+      WHERE custkey = pCustomer;
+    END IF;
+
+  END IF;
+
+  -- #3. append subsidy
+  IF pResults.pSubsidy IS NOT NULL AND pResults.pSubsidy.COUNT > 0
+  THEN
+    -- add subsidy header item
+    INSERT INTO bs.trashitem (operdate, enterdate, amount, trashtariffvalueid, custkey, operationid, isprinted)
+    VALUES (TRUNC(pItemDate), SYSDATE, 0, 0, pCustomer, pResults.pSubsidy(1).pOperationId, 0)
+    RETURNING trashitemid INTO pNewSubsidyItemId;
+
+    -- adding details for the item
+    pCounter := 1;
+    pSummaryGel := 0;
+    WHILE pCounter <= presults.pSubsidy.COUNT
+    LOOP
+      -- getting subsidy
+      pSubsidy := pResults.pSubsidy(pCounter);
+
+      -- inserting subsidy detail
+      IF ABS(pSubsidy.pGel) >= MIN_GEL
+      THEN
+        -- insert into item details
+        INSERT INTO bs.trash_item_det (item_id, start_date, end_date,
+          amnt_in_m3, amnt_in_gel, enter_date, parent_item_id,
+          subs_det_id, subs_count, cust_det_id)
+        VALUES (pNewSubsidyItemId, pMonth.pFirst, pMonth.pLast,
+          0, pSubsidy.pGel, SYSDATE, pNewItemId,
+          pSubsidy.pSubsidyDetailId, pSubsidy.pPersonCount, pSubsidy.pCustomerDetailId
+        );
+        pSummaryGel := pSummaryGel + ROUND(pSubsidy.pGel, 2);
+      END IF;
+
+      -- next step
+      pCounter := pCounter + 1;
+    END LOOP;
+
+    -- update header and customer balance
+    IF ABS(pSummaryGel) >= MIN_GEL
+    THEN
+      UPDATE bs.trashitem
+        SET amount = ROUND(pSummaryGel, 2)
+      WHERE trashitemid = pNewSubsidyItemId;
+
+      UPDATE bs.trashcustomer
+        SET balance = balance + ROUND(pSummaryGel, 2),
+          curr_balance = curr_balance + ROUND(pSummaryGel, 2)
+      WHERE custkey = pCustomer;
+    -- delete header item, because there is no charge
+    ELSE
+      DELETE bs.trashitem
+      WHERE trashitemid = pNewSubsidyItemId;
+    END IF;
+
+  END IF;
+END;
 
 /**
  * Use this procedure for consequent months charging.
@@ -1816,110 +1774,7 @@ BEGIN
   -- loop over all active customers: current situation
   FOR rec IN (SELECT * FROM bs.trashcustomer WHERE (status IS NULL OR status = 0))
   LOOP
-
-    -- #1. calculate this month
-    calcMonth(rec.CUSTKEY, pMonth, HINT_DEFAULT, pResults);
-
-    -- #2. append charge
-    IF pResults.pCharge IS NOT NULL AND pResults.pCharge.COUNT > 0
-    THEN
-      -- add header item
-      INSERT INTO bs.trashitem (operdate, enterdate, amount, custkey, operationid, isprinted)
-      VALUES (TRUNC(pItemDate), SYSDATE, 0, rec.custkey, OPER_CHARGE, 0)
-      RETURNING trashitemid INTO pNewItemId;
-
-      -- adding details for the item
-      pCounter := 1;
-      pSummaryGel := 0;
-      WHILE pCounter <= pResults.pCharge.COUNT
-      LOOP
-        -- getting charge
-        pCharge := pResults.pCharge(pCounter);
-
-        -- inserting charge
-        --IF ABS(pCharge.pGel) >= MIN_GEL
-        --THEN
-          -- add detail record
-          INSERT INTO bs.trash_item_det (item_id, cat_coeff_id, start_date, end_date,
-            amnt_in_m3, amnt_in_gel, enter_date, cust_det_id)
-          VALUES (pNewItemId, pCharge.pCoeffId, pCharge.pStart, pCharge.pEnd,
-            0, ROUND (pCharge.pGel, 2), SYSDATE, pCharge.pCustomerDetailId);
-          -- make summary
-          pSummaryGel := pSummaryGel + ROUND(pCharge.pGel, 2);
-        --END IF;
-
-        -- next step
-        pCounter := pCounter + 1;
-      END LOOP;
-
-      -- update header and customer balance
-      IF ABS(pSummaryGel) >= MIN_GEL
-      THEN
-        UPDATE bs.trashitem
-          SET amount = ROUND(pSummaryGel, 2)
-        WHERE trashitemid = pNewItemId;
-
-        UPDATE bs.trashcustomer
-          SET balance = balance + ROUND(pSummaryGel, 2),
-            curr_balance = curr_balance + ROUND(pSummaryGel, 2)
-        WHERE custkey = rec.custkey;
-      END IF;
-
-    END IF;
-
-    -- #3. append subsidy
-    IF pResults.pSubsidy IS NOT NULL AND pResults.pSubsidy.COUNT > 0
-    THEN
-      -- add subsidy header item
-      INSERT INTO bs.trashitem (operdate, enterdate, amount, trashtariffvalueid, custkey, operationid, isprinted)
-      VALUES (TRUNC(pItemDate), SYSDATE, 0, 0, rec.custkey, pResults.pSubsidy(1).pOperationId, 0)
-      RETURNING trashitemid INTO pNewSubsidyItemId;
-
-      -- adding details for the item
-      pCounter := 1;
-      pSummaryGel := 0;
-      WHILE pCounter <= presults.pSubsidy.COUNT
-      LOOP
-        -- getting subsidy
-        pSubsidy := pResults.pSubsidy(pCounter);
-
-        -- inserting subsidy detail
-        IF ABS(pSubsidy.pGel) >= MIN_GEL
-        THEN
-          -- insert into item details
-          INSERT INTO bs.trash_item_det (item_id, start_date, end_date,
-            amnt_in_m3, amnt_in_gel, enter_date, parent_item_id,
-            subs_det_id, subs_count, cust_det_id)
-          VALUES (pNewSubsidyItemId, pMonth.pFirst, pMonth.pLast,
-            0, pSubsidy.pGel, SYSDATE, pNewItemId,
-            pSubsidy.pSubsidyDetailId, pSubsidy.pPersonCount, pSubsidy.pCustomerDetailId
-          );
-          pSummaryGel := pSummaryGel + ROUND(pSubsidy.pGel, 2);
-        END IF;
-
-        -- next step
-        pCounter := pCounter + 1;
-      END LOOP;
-
-      -- update header and customer balance
-      IF ABS(pSummaryGel) >= MIN_GEL
-      THEN
-        UPDATE bs.trashitem
-          SET amount = ROUND(pSummaryGel, 2)
-        WHERE trashitemid = pNewSubsidyItemId;
-
-        UPDATE bs.trashcustomer
-          SET balance = balance + ROUND(pSummaryGel, 2),
-            curr_balance = curr_balance + ROUND(pSummaryGel, 2)
-        WHERE custkey = rec.custkey;
-      -- delete header item, because there is no charge
-      ELSE
-        DELETE bs.trashitem
-        WHERE trashitemid = pNewSubsidyItemId;
-      END IF;
-
-    END IF;
-
+    runRegularTrash_cust(rec.custkey, pMonth, pItemDate);
   END LOOP;
 
 END runRegularTrash;
@@ -1959,7 +1814,7 @@ END;
  */
 PROCEDURE assertCorrectionInterval(pStart DATE, pEnd DATE) IS
 BEGIN
-
+/*
   -- if start date > end date
   IF pStart > pEnd
   THEN
@@ -1977,6 +1832,9 @@ BEGIN
   THEN
     RAISE_APPLICATION_ERROR(-20000, 'End date is out of supported interval.');
   END IF;
+*/
+
+null;
 
 END; -- assert_correction_interval
 
@@ -2014,10 +1872,12 @@ BEGIN
     AND det.END_DATE BETWEEN pMonth.pFirst AND pMonth.pLast
     AND it.OPERATIONID IN (
       OPER_SUBSIDY_50_PERCENT,
+      OPER_SUBSIDY_50_PERCENT_2011,
       OPER_SUBSIDY_100_PERCENT,
       OPER_PREV_PERIOD_SUBSIDY,
       OPER_SUBSIDY_CORRECTION,
-      OPER_SUBSIDY_CORR_AFTER_2011
+      OPER_SUBSIDY_CORR_AFTER_2011,
+      OPER_SUBSIDY_CORR_MERIA
   );
 
   -- slight adjusting, in case if we have NULL instead of number
@@ -2080,8 +1940,8 @@ END recalculateMonth;
 PROCEDURE recalculationRoutine(
   pCustomerId NUMBER,
   pHint       NUMBER,
-  pStart      DATE := MIN_CORRECTION_DATE,
-  pEnd        DATE := MAX_CORRECTION_DATE
+  pOnlySubsiy BOOLEAN,
+  pStart      DATE := MIN_CORRECTION_DATE
 ) IS
   pNewHint NUMBER := NVL(pHint, 0);
   pNewStart DATE;
@@ -2112,10 +1972,46 @@ PROCEDURE recalculationRoutine(
   l_next_balance NUMBER;
   l_next_old_balance NUMBER;
   l_next_tech_balance NUMBER;
+  pEnd DATE;
 BEGIN
 
-  -- assert interval
-  assertCorrectionInterval(pStart, pEnd);
+  IF pOnlySubsiy
+  THEN
+    DECLARE
+      l_send BOOLEAN;
+    BEGIN
+      l_send := pNewHint != 0;
+      DIMITRI.simple_subsidy_voucher.calc_voucher(pCustomerId, l_send);
+    END;
+    RETURN;
+  END IF;
+
+  -- calculate correction end date
+
+  DECLARE
+    l_schedule_date DATE;
+  BEGIN
+    SELECT MAX(s.cycledate) INTO l_schedule_date
+    FROM bs.schedule s
+    INNER JOIN bs.route r on r.routekey = s.routekey
+    INNER JOIN bs.routeacc ra on ra.routekey = r.routekey
+    INNER JOIN bs.account a on a.acckey = ra.acckey and a.mainaccount = 1
+    WHERE a.custkey = pCustomerId AND s.stat = 5;
+
+    IF l_schedule_date IS NOT NULL
+    THEN
+      pEnd := TRUNC(ADD_MONTHS(l_schedule_date, -1));
+    ELSE
+      SELECT MAX(operdate) INTO l_schedule_date
+      FROM bs.trashitem WHERE custkey = pCustomerId AND operationid = 212;
+      IF l_schedule_date IS NOT NULL
+      THEN
+        pEnd := TRUNC(ADD_MONTHS(l_schedule_date, -1));
+      ELSE
+        pEnd := TRUNC(ADD_MONTHS(SYSDATE, -2));
+      END IF;
+    END IF;
+  END;
 
   -- clear previous calculation results for this customer
   DELETE FROM BS.TRASH_RECALC_RESULTS WHERE CUSTOMER_ID = pCustomerId;
@@ -2131,12 +2027,15 @@ BEGIN
   IF pHint != 0
   THEN
     -- charge headers
-    INSERT INTO bs.trashitem (operdate, enterdate, amount, custkey, operationid, isprinted)
-    VALUES (TRUNC(SYSDATE), SYSDATE, 0, pCustomerId, OPER_CHARGE_CORRECTION, 0)
-    RETURNING trashitemid INTO pNewItemId;
-    INSERT INTO bs.trashitem (operdate, enterdate, amount, custkey, operationid, isprinted)
-    VALUES (TRUNC(SYSDATE), SYSDATE, 0, pCustomerId, OPER_CHARGE_CORR_AFTER_2011, 0)
-    RETURNING trashitemid INTO pNewItemId_2011;
+    IF NOT pOnlySubsiy
+    THEN
+      INSERT INTO bs.trashitem (operdate, enterdate, amount, custkey, operationid, isprinted)
+      VALUES (TRUNC(SYSDATE), SYSDATE, 0, pCustomerId, OPER_CHARGE_CORRECTION, 0)
+      RETURNING trashitemid INTO pNewItemId;
+      INSERT INTO bs.trashitem (operdate, enterdate, amount, custkey, operationid, isprinted)
+      VALUES (TRUNC(SYSDATE), SYSDATE, 0, pCustomerId, OPER_CHARGE_CORR_AFTER_2011, 0)
+      RETURNING trashitemid INTO pNewItemId_2011;
+    END IF;
 
     -- subsidy headers
     INSERT INTO bs.trashitem (operdate, enterdate, amount, custkey, operationid, isprinted)
@@ -2173,7 +2072,7 @@ BEGIN
     -- make charge correction --
     ----------------------------
 
-    IF ABS(pRecalcCharge - pExistCharge) >= MIN_GEL
+    IF ABS(pRecalcCharge - pExistCharge) >= MIN_GEL AND NOT pOnlySubsiy
     THEN
 
       -- before/after 2011 year
@@ -2446,12 +2345,12 @@ END recalculationRoutine;
  */
 PROCEDURE recalculate(
   pCustomerId NUMBER,
-  pStart       DATE := MIN_CORRECTION_DATE,
-  pEnd         DATE := MAX_CORRECTION_DATE
+  pOnlySubsiy BOOLEAN := FALSE,
+  pStart DATE := MIN_CORRECTION_DATE
 ) IS
 BEGIN
   -- recalculate with hint "0"
-  recalculationRoutine(pCustomerId, 0, pStart, pEnd);
+  recalculationRoutine(pCustomerId, 0, pOnlySubsiy, pStart);
 END recalculate;
 
 /**
@@ -2459,12 +2358,12 @@ END recalculate;
  */
 PROCEDURE recalculateAndSendToItem(
   pCustomerId NUMBER,
-  pStart      DATE := MIN_CORRECTION_DATE,
-  pEnd        DATE := MAX_CORRECTION_DATE
+  pOnlySubsiy BOOLEAN := FALSE,
+  pStart DATE := MIN_CORRECTION_DATE
 ) IS
 BEGIN
   -- recalculate with hint "0"
-  recalculationRoutine(pCustomerId, 1, pStart, pEnd);
+  recalculationRoutine(pCustomerId, 1, pOnlySubsiy, pStart);
 END recalculateAndSendToItem;
 
 /**
@@ -2516,7 +2415,7 @@ PROCEDURE recalculate_2010 (
 ) IS
 BEGIN
 
-  recalculate(pcustomerid, '01-Jan-2010');
+  recalculationRoutine(pcustomerid, 0, FALSE, '01-Jan-2010');
 
 END recalculate_2010;
 
@@ -2528,7 +2427,7 @@ PROCEDURE recalculateAndSendToItem_2010 (
 ) IS
 BEGIN
 
-  recalculateAndSendToItem(pcustomerid, '01-Jan-2010');
+  recalculationRoutine(pcustomerid, 1, FALSE, '01-Jan-2010');
 
 END recalculateAndSendToItem_2010;
 
@@ -2545,8 +2444,10 @@ PROCEDURE addMonthlySummaryWarning (
 ) IS
 BEGIN
 
-  INSERT INTO bs.trash_balance_warn (rep_date, customer_id, warn_id, remark)
-  VALUES (pReportingDate, pCustomerId, pWarningCode, pRemark);
+  --INSERT INTO bs.trash_balance_warn (rep_date, customer_id, warn_id, remark)
+  --VALUES (pReportingDate, pCustomerId, pWarningCode, pRemark);
+
+  NULL;
 
 END addMonthlySummaryWarning;
 
@@ -2557,14 +2458,14 @@ FUNCTION normalizeGel(pGel NUMBER, pOperationId NUMBER)
 RETURN NUMBER
 IS
 BEGIN
-  -- payment
+  -- payments
   IF pOperationId IN (12, 16, 35, 49, 150, 20)
   THEN
     RETURN -pGel;
   -- subsidies
-  ELSIF pOperationId IN (221, 222)
-  THEN
-    RETURN -ABS (pGel);
+--  ELSIF pOperationId IN (220, 221, 222)
+--  THEN
+--    RETURN -ABS (pGel);
   -- other operations
   ELSE
     RETURN pGel;
@@ -2591,8 +2492,8 @@ RETURN NUMBER
 IS
   l_old_balanace NUMBER;
 BEGIN
-  IF pPrevOldBalance IS NULL
-  THEN
+  --IF pPrevOldBalance IS NULL
+  --THEN
     BEGIN
       SELECT old_balance INTO l_old_balanace
       FROM ( SELECT old_balance
@@ -2607,7 +2508,7 @@ BEGIN
       WHERE custkey = pCustomerId;
     END;
     RETURN NVL(l_old_balanace, 0);
-  ELSE
+  /*ELSE
     -- old operation
     IF pOperationId IN (OPER_CHARGE_CORRECTION, OPER_SUBSIDY_CORRECTION, OPER_PREV_PERIOD_SUBSIDY, 19, 100)
     THEN
@@ -2626,7 +2527,7 @@ BEGIN
     ELSE
       RETURN NVL(pPrevOldBalance, 0);
     END IF;
-  END IF;
+  END IF;*/
 END calcOldItemBalance;
 
 /**
@@ -2634,8 +2535,9 @@ END calcOldItemBalance;
  */
 PROCEDURE getCustomerInfo (
   pReportingDate                DATE,
-  pCustomerId             NUMBER,
-  pCustomerInfo   OUT   TP_CUSTOMER_SUMMARY
+  pCustomerId                   NUMBER,
+  pCustomerInfo   OUT   TP_CUSTOMER_SUMMARY,
+  pMaxItemKey     NUMBER
 ) IS
 
   -- Units cursor
@@ -2647,7 +2549,8 @@ PROCEDURE getCustomerInfo (
         -- #1. Monthly summary category Id
         CASE
         WHEN --OLD: u.cat_id = cat_common
-          u.id = CUM_RESIDENT_JAN2007
+          u.id = CUM_RESIDENT_JAN2007 OR
+          u.id = CUM_RESIDENT_MAR2011 -- @since August, 2011
         THEN
           -- residential
           MONSUM_RESIDENTIAL_CATEGORY
@@ -2698,6 +2601,7 @@ PROCEDURE getCustomerInfo (
         operationid oper_id, balance, old_balance
       FROM bs.trashitem
       WHERE custkey = p_customer AND operdate <= p_cut_date
+        AND trashitemid < NVL(pMaxItemKey,999999999999999999999999999)
       ORDER BY trashitemid DESC)
     WHERE ROWNUM = 1;
 
@@ -2767,8 +2671,66 @@ BEGIN
     p_start_curr_debet := 0;
     p_start_curr_credit := 0;
   END IF;
+
   CLOSE last_item_analyz;
   CLOSE units_cursor;
+
+--------------------------------------------------------------------------------
+
+  -- XXX: correct balance!!! (@since end of december 2011)
+  
+  IF p_prev_last_item_id > 0
+  THEN
+  
+    DECLARE
+      l_next_balance NUMBER;
+      l_next_old_balance NUMBER;
+      l_next_curr_balance NUMBER;
+    BEGIN
+      BEGIN
+        SELECT balance, old_balance INTO l_next_balance, l_next_old_balance
+        FROM (
+          SELECT balance, old_balance
+          FROM bs.trashitem
+          WHERE custkey = pCustomerId AND trashitemid > p_prev_last_item_id
+          ORDER BY trashitemid ASC
+        ) WHERE ROWNUM = 1;
+      EXCEPTION WHEN no_data_found
+      THEN
+        SELECT balance, old_balance INTO l_next_balance, l_next_old_balance
+        FROM bs.trashcustomer 
+        WHERE custkey = pCustomerId;
+      END;
+      l_next_curr_balance := l_next_balance - NVL(l_next_old_balance, 0);
+
+      -- start OLD
+      p_start_old_balance := NVL(l_next_old_balance, 0);
+
+      -- start FULL
+      IF l_next_balance > 0
+      THEN
+        p_start_debet := ABS(l_next_balance);
+        p_start_credit := 0;
+      ELSE
+        p_start_debet := 0;
+        p_start_credit := ABS(l_next_balance);
+      END IF;
+
+      -- start CURR
+      IF l_next_curr_balance > 0
+      THEN
+        p_start_curr_debet := ABS(l_next_curr_balance);
+        p_start_curr_credit := 0;
+      ELSE
+        p_start_curr_debet := 0;
+        p_start_curr_credit := ABS(l_next_curr_balance);
+      END IF;
+
+    END;
+
+  END IF;
+
+--------------------------------------------------------------------------------
 
   -- look up last item in customer's history
   OPEN last_customer_item (pCustomerId, pReportingDate);
@@ -2777,6 +2739,7 @@ BEGIN
 
   IF NOT last_customer_item%FOUND
   THEN
+
     p_end_debet       := 0;
     p_end_credit      := 0;
     p_end_old_balance := 0;
@@ -2791,6 +2754,7 @@ BEGIN
     END IF;
 
   ELSE
+
     p_item_balance    := calcItemBalance    (p_balance, p_amount_in_gel, p_oper_id);
     p_end_old_balance := calcOldItemBalance (pCustomerId, p_last_item_id, p_old_balance, p_amount_in_gel, p_oper_id);
     p_curr_balance    := p_item_balance - p_end_old_balance;
@@ -2803,7 +2767,7 @@ BEGIN
       p_end_debet  := 0;
       p_end_credit := ABS (p_item_balance);
     END IF;
-    
+
     IF p_curr_balance > 0
     THEN
       p_end_curr_debet  := ABS(p_curr_balance);
@@ -2812,6 +2776,7 @@ BEGIN
       p_end_curr_debet  := 0;
       p_end_curr_credit := ABS(p_curr_balance);
     END IF;
+
   END IF;
 
   CLOSE last_customer_item;
@@ -2873,6 +2838,7 @@ IS
   p_has_charge_det NUMBER;
   p_has_zero_charge NUMBER;
   p_sum_charge_gel NUMBER;
+  cMaxitem  NUMBER := null; --67299274
 BEGIN
   -- get last reporting date and check it
   SELECT MAX (rep_date) INTO pLastReportingDate FROM bs.trash_cust_bef_balance;
@@ -2886,16 +2852,17 @@ BEGIN
   END IF;
 
   -- loop over all customers
-  FOR rec IN (SELECT
+  FOR rec IN (
+    SELECT
       tc.custkey customer_id, tc.status status, cust.custcatkey cust_cat_id,
       tc.balance curr_balance, address.regionkey serv_cent_id
     FROM bs.trashcustomer tc, bs.customer cust, bs.address
-    WHERE tc.custkey = cust.custkey
-      AND cust.premisekey = address.premisekey
+    WHERE tc.custkey = cust.custkey AND
+          cust.premisekey = address.premisekey
     ORDER BY tc.custkey
   ) LOOP
     -- get customer information for reporting date
-    getCustomerInfo(pReportingDate, rec.customer_id, pCustomerInfo);
+    getCustomerInfo(pReportingDate, rec.customer_id, pCustomerInfo, cMaxitem);
 
     -- validate current balance with last item
     IF pCustomerInfo.last_item_id IS NOT NULL
@@ -2935,7 +2902,7 @@ BEGIN
       pCustomerInfo.pers_count, NVL (rec.status, 0),
       NVL (pCustomerInfo.start_debet, 0), NVL (pCustomerInfo.end_debet, 0), NVL (pCustomerInfo.start_credit, 0), NVL (pCustomerInfo.end_credit, 0),
       NVL (pCustomerInfo.last_item_id, -1), NVL (pCustomerInfo.prev_last_item_id, -1),
-      p_subs_count, pCustomerInfo.curr_subs_pers_count,
+      NVL(p_subs_count, 0), NVL(pCustomerInfo.curr_subs_pers_count, 0),
       p_enter_date, 0, 0,
       pCustomerInfo.start_old_balance, pCustomerInfo.start_curr_debet, pCustomerInfo.start_curr_credit,
       pCustomerInfo.end_old_balance, pCustomerInfo.end_curr_debet, pCustomerInfo.end_curr_credit
@@ -3033,7 +3000,21 @@ BEGIN
           END IF;
 
           -- process insertion
-          pGel := normalizeGel(NVL(item.det_gel, 0), item.oper_id);
+
+          -- @since 30-Dec-2011: XXX??
+          /*IF item.oper_id = 229
+          THEN
+            pGel := normalizeGel(NVL(-item.det_gel, 0), item.oper_id);
+          ELSE*/
+          -- @since 3-Dec-2011: when item and details have different signs
+          -- then item's sign takes priority
+          /*IF item.oper_id = 229 AND (item.det_gel * item.item_gel < 0)
+          THEN
+            pGel := normalizeGel(NVL(-item.det_gel, 0), item.oper_id);
+          ELSE*/
+            pGel := normalizeGel(NVL(item.det_gel, 0), item.oper_id);
+          /*END IF;*/
+
           INSERT INTO bs.trash_cust_bef_balance_det (
             customer_id, oper_id, cat_unit_id, cat_coeff_id, tariff_id,
             amnt_in_m3, amnt_in_gel, subs_count, subs_pers_count, item_id,
@@ -3106,12 +3087,872 @@ BEGIN
         PERS_COUNT = 0
       WHERE ID = p_new_balance_id;
     END IF;
-    
+
     -- @since: END
 
   END LOOP;
 
+  -- put KWH changes
+  declare
+    l_kwh NUMBER;
+  begin
+    FOR rec IN (
+      SELECT DISTINCT b_det.balance_id, it_det.kwh_item_id
+      FROM bs.trash_cust_bef_balance_det b_det
+      INNER JOIN bs.trash_item_det it_det on it_det.item_id = b_det.item_id AND it_det.kwh_item_id IS NOT NULL
+      WHERE b_det.balance_id IN (SELECT id FROM bs.trash_cust_bef_balance WHERE rep_date in (pReportingDate))
+    ) LOOP
+      SELECT NVL(SUM(kwt), 0) INTO l_kwh FROM bs.item WHERE itemkey = rec.kwh_item_id;
+      UPDATE bs.trash_cust_bef_balance
+      SET kwh = NVL(kwh, 0) + l_kwh
+      WHERE id = rec.balance_id;
+    END LOOP;
+  END;
+
 END runTrashSummary;
+
+---------------------------- calculate from billing ----------------------------
+
+FUNCTION calc_standard_gel (
+  p_kwh NUMBER, p_start DATE, p_end DATE
+) RETURN NUMBER IS
+  l_gel NUMBER;
+  l_tariff Dimitri.trash_tariff%ROWTYPE;
+  l_d1 DATE := p_start;
+  l_d2 DATE := p_end;
+  l_t1 DATE;
+  l_t2 DATE;
+  l_dist NUMBER;
+  l_delta NUMBER;
+  l_skip BOOLEAN;
+  l_kwh NUMBER;
+BEGIN
+
+  IF (ABS(p_kwh) < 0.0001) THEN
+    RETURN 0;
+  END IF;
+
+  IF l_d1 IS NULL
+  THEN
+    SELECT * INTO l_tariff FROM dimitri.trash_tariff WHERE tariff_key = 1;
+    RETURN ROUND(l_tariff.TARIFF * p_kwh, 2);
+  ELSIF l_d2 IS NULL
+  THEN
+    SELECT * INTO l_tariff FROM dimitri.trash_tariff
+    WHERE tariff_key IN (SELECT max(tariff_key) FROM dimitri.trash_tariff);
+    RETURN ROUND(l_tariff.TARIFF * p_kwh, 2);
+  END IF;
+
+  l_gel := 0;
+  l_dist := l_d2 - l_d1;
+
+  IF l_dist < 0
+  THEN
+    --raise_application_error(-20000, 'trash gel calculation: startDate > endDate');
+    RETURN 0;
+  ELSIF l_dist = 0
+  THEN
+    l_dist := 1;
+  END IF;
+
+  FOR tar IN (select *from dimitri.trash_tariff order by tariff_key)
+  LOOP
+    l_t1 := tar.start_date;
+    l_t2 := tar.end_date;
+    l_delta := 0;
+    IF l_d1 > l_d2
+    THEN
+      EXIT;
+    END IF;
+    -- t1 .. d1 .. d2 .. t2
+    IF (l_t1 IS NULL OR l_t1 <= l_d1) AND (l_t2 IS NULL OR l_t2 >= l_d2)
+    THEN
+      l_delta := l_d2 - l_d1;
+      l_skip := FALSE;
+    -- t1 .. d2 .. t2 .. d1
+    ELSIF (l_t1 IS NULL OR l_t1 <= l_d1) AND (l_t2 IS NOT NULL AND l_t2 > l_d1 )
+    THEN
+      l_delta := l_t2 - l_d1;
+      l_skip := FALSE;
+    -- d1 .. t1 .. t2 .. d2
+    ELSIF (l_t1 IS NOT NULL AND l_t1 > l_d1) AND (l_t2 IS NOT NULL AND l_t2 <= l_d2)
+    THEN
+      l_delta := l_t2 - l_t1 + 1;
+      l_skip := FALSE;
+    -- d1 .. t1 .. d2 .. t1
+    ELSIF (l_t1 IS NOT NULL AND l_t1 <= l_d2) AND (l_t2 IS NULL OR l_t2 >= l_d2)
+    THEN
+      l_delta := l_d2 - l_t1  + 1;
+      l_skip := FALSE;
+    -- no intersection
+    ELSE
+      l_skip := TRUE;
+    END IF;
+
+    IF NOT l_skip
+    THEN
+      IF l_delta = 0 THEN l_delta := 1; END IF;
+      l_kwh := p_kwh * l_delta / l_dist;
+      l_gel := l_gel + l_kwh * tar.tariff;
+      l_d1 := l_d1 + l_delta;
+    END IF;
+
+  END LOOP;
+
+  RETURN ROUND(l_gel, 2);
+
+/*IF p_start IS NULL AND p_end IS NOT NULL and p_end >= TARIFF_FROM_2012 -- 01/Nov/2012
+  THEN
+    RETURN ROUND(GEL_PER_KWH_2012 * p_kwh, 2);
+  ELSIF p_start IS NULL OR (   p_end IS NOT NULL AND   p_end < TARIFF_FROM_2012)
+  THEN
+    RETURN ROUND(GEL_PER_KWH_2011 * p_kwh, 2);
+  ELSIF p_end IS NULL OR (p_start IS NOT NULL AND p_start >= TARIFF_FROM_2012)
+  THEN
+    RETURN ROUND(GEL_PER_KWH_2012 * p_kwh, 2);
+  ELSE
+    IF p_end < p_start
+    THEN
+      l_end := p_start;
+    END IF;
+    l_days := l_end - p_start;
+    l_days_2011 := TARIFF_FROM_2012 - p_start - 1;
+
+    --dbms_output.put_line( l_days || ' / ' || l_days_2011 );
+
+    l_kwh_2011 := p_kwh * l_days_2011 / l_days;
+    l_gel := l_kwh_2011 * GEL_PER_KWH_2011;
+    l_gel := l_gel + (p_kwh - l_kwh_2011) * GEL_PER_KWH_2012;
+    RETURN ROUND( l_gel, 2 );
+  END IF;*/
+
+END;
+
+FUNCTION get_conjunction_for_prnt_corr(p_operation NUMBER)
+RETURN NUMBER
+IS
+BEGIN
+  IF p_operation = 197
+  THEN
+    RETURN 292;
+  ELSIF p_operation = 292
+  THEN
+    RETURN 197;
+  ELSIF p_operation = 199
+  THEN
+    RETURN 291;
+  ELSIF p_operation = 291
+  THEN
+    RETURN 199;
+  ELSIF p_operation = 352
+  THEN
+    RETURN 351;
+  ELSIF p_operation = 351
+  THEN
+    RETURN 352;
+  ELSIF p_operation = 532
+  THEN
+    RETURN 531;
+  ELSIF p_operation = 531
+  THEN
+    RETURN 532;
+  ELSIF p_operation = 552
+  THEN
+    RETURN 551;
+  ELSIF p_operation = 551
+  THEN
+    RETURN 552;
+  ELSIF p_operation = 562
+  THEN
+    RETURN 561;
+  ELSIF p_operation = 561
+  THEN
+    RETURN 562;
+  ELSIF p_operation = 572
+  THEN
+    RETURN 571;
+  ELSIF p_operation = 571
+  THEN
+    RETURN 572;
+-- 2011
+  ELSIF p_operation = 601
+  THEN
+    RETURN 602;
+  ELSIF p_operation = 602
+  THEN
+    RETURN 601;
+  ELSIF p_operation = 600
+  THEN
+    RETURN 600;
+-- 2012
+  ELSIF p_operation = 582
+  THEN
+    RETURN 581;
+  ELSIF p_operation = 581
+  THEN
+    RETURN 582;
+-- 2013
+  ELSIF p_operation = 592
+  THEN
+    RETURN 591;
+  ELSIF p_operation = 591
+  THEN
+    RETURN 592;
+-- UNKNOWN
+  ELSE
+    RETURN -1;
+  END IF;
+  RETURN -1;
+END;
+
+/**
+ * 0 - no subsidy
+ * 1 - 50% subsidy (refugee)
+ * 2 - 50% subsidy NEW! (2011, city council)
+ */
+FUNCTION has_subsidy_50_in_period (
+  p_itemdate DATE,
+  p_customer NUMBER,
+  p_d1 DATE,
+  p_d2 DATE
+) RETURN NUMBER IS
+  l_d1 DATE;
+  l_d2 DATE;
+  l_intersection BOOLEAN;
+  l_resp NUMBER := 0;
+BEGIN
+
+  -- @since FEB, 2013: customers don't have subsidy in the period from 01/02/2013 - 30/04/2013
+  IF p_itemdate NOT BETWEEN '01-FEB-2013' AND '30-APR-2099'
+  THEN
+  --
+
+    FOR subs IN SUBSIDY_CURSOR(p_customer, p_d1, p_d2)
+    LOOP
+      IF subs.QUANTITY IS NULL OR subs.QUANTITY > 0
+      THEN
+        findIntersection(p_d1, p_d2, subs.fromdate, subs.todate, l_intersection, l_d1, l_d2);
+        IF l_intersection
+        THEN
+          IF subs.operationid = OPER_SUBSIDY_50_PERCENT
+          THEN
+            RETURN 1;
+          ELSIF subs.operationid = OPER_SUBSIDY_50_PERCENT_2011
+          THEN
+            l_resp := 2;
+          END IF;
+        END IF;
+      END IF;
+    END LOOP;
+  
+  --
+  END IF;
+  --
+
+  RETURN l_resp;
+END;
+
+FUNCTION item_is_processed(p_itemkey NUMBER, p_mark_processed BOOLEAN := TRUE) RETURN BOOLEAN
+IS
+  l_dummy NUMBER;
+BEGIN
+  BEGIN
+    SELECT itemkey INTO l_dummy
+    FROM bs.trash_electricity_completed
+    WHERE itemkey = p_itemkey;
+    RETURN l_dummy IS NOT NULL; -- always TRUE!
+  EXCEPTION WHEN no_data_found
+  THEN
+    IF p_mark_processed
+    THEN
+      DECLARE
+        l_custkey NUMBER;
+        l_acckey NUMBER;
+      BEGIN
+        SELECT custkey, acckey INTO l_custkey, l_acckey
+        FROM bs.item
+        WHERE itemkey = p_itemkey;
+        IF l_custkey IS NOT NULL
+        THEN
+          INSERT INTO bs.trash_electricity_completed(itemkey, custkey, acckey)
+          VALUES(p_itemkey, l_custkey, l_acckey);
+        END IF;
+      EXCEPTION WHEN no_data_found
+      THEN
+        NULL;
+      END;
+    END IF;
+    RETURN FALSE;
+  END;
+END;
+
+PROCEDURE process_kwh_on_account(p_customer NUMBER, p_account NUMBER, p_itemdate DATE, p_schedule NUMBER)
+IS
+  l_prev_cycle_last_item        NUMBER;
+  l_prev_cycle_last_itemdate    DATE;
+  l_prev_cycle_last_enterdate   DATE;
+  l_charge_item  NUMBER;
+  l_charge_total NUMBER;
+  l_charge_total_kwh NUMBER;
+  l_correction_item  NUMBER;
+  l_correction_total NUMBER;
+  l_correction_total_kwh NUMBER;
+  l_subs_cat NUMBER;
+  l_subsidy_50_total_kwh NUMBER;
+  l_subsidy_50_total_gel NUMBER;
+  l_subsidy_50_item NUMBER;
+  l_subsidy_50_total_kwh_2011 NUMBER;
+  l_subsidy_50_item_2011 NUMBER;
+  l_gel NUMBER;
+  l_balance NUMBER;
+  l_old_balance NUMBER;
+  l_tech_balance NUMBER;
+  l_intersection BOOLEAN;
+  l_d1 DATE;
+  l_d2 DATE;
+  l_kwh NUMBER;
+  l_continue BOOLEAN;
+  l_registration_date DATE;
+BEGIN
+
+  bs.bill_manager_2006.get_previous_cycle_info (p_account, p_schedule,
+      l_prev_cycle_last_item, l_prev_cycle_last_itemdate,
+      l_prev_cycle_last_enterdate);
+
+  BEGIN
+    SELECT
+      ROUND(NVL(balance, 0), 2),   ROUND(NVL(old_balance, 0), 2),   ROUND(NVL(tech_balance, 0), 2),
+      firstregistrationdate
+    INTO
+      l_balance,                   l_old_balance,                   l_tech_balance,
+      l_registration_date
+    FROM bs.trashcustomer
+    WHERE custkey = p_customer;
+
+    -- @since DEC/2012: when prevcycle not defined, use customer registration date
+    IF l_prev_cycle_last_itemdate IS NULL OR TRUNC(l_prev_cycle_last_itemdate) = '01-Jan-1980'
+    THEN
+      l_prev_cycle_last_itemdate := l_registration_date;
+    END IF;
+  EXCEPTION WHEN NO_DATA_FOUND 
+  THEN
+    RETURN;
+  END;
+
+
+  -- A: loop on charges
+
+  l_charge_total := 0;
+  l_charge_total_kwh := 0;
+  l_subsidy_50_total_kwh := 0;
+  l_subsidy_50_total_gel := 0;
+  l_subsidy_50_total_kwh_2011 := 0;
+  FOR item IN (
+    SELECT it.* FROM bs.item it
+    INNER JOIN bs.billoperation bop ON it.billoperkey = bop.billoperkey
+    WHERE it.acckey = p_account AND it.itemkey > l_prev_cycle_last_item AND bop.trash_category = BOP_CATEGORY_CHARGE)
+  LOOP
+
+    IF
+      (item.billoperkey = bill_manager_2006.OPER_PARENT_CHARGE OR
+       item.itemnumber LIKE 'prnt%') AND
+      TRUNC(item.itemdate) = TRUNC(l_prev_cycle_last_itemdate)
+    THEN
+      l_continue := FALSE;
+    ELSIF item.itemdate < BS.BILL_MANAGER_2006.DATE_TRASH_JOIN
+    THEN
+      l_continue := FALSE;
+    ELSE
+      l_continue := NOT item_is_processed(item.ITEMKEY);
+    END IF;
+
+    IF l_continue
+    THEN
+      IF l_charge_item IS NULL
+      THEN
+        INSERT INTO bs.trashitem (
+          operdate, enterdate, custkey,
+          operationid, amount,
+          balance, old_balance, tech_balance,
+          assistantid, signid, isprinted
+        ) VALUES (
+          p_itemdate, sysdate, p_customer,
+          OPER_CHARGE, 0,
+          l_balance, l_old_balance, l_tech_balance,
+          1, 1, 0
+        ) RETURNING trashitemid INTO l_charge_item;
+      END IF;
+
+      --l_gel := ROUND( item.kwt * GEL_PER_KWH_2011 , 2 );
+      l_gel := ROUND( calc_standard_gel(item.kwt, l_prev_cycle_last_itemdate, p_itemdate), 2 );
+      INSERT INTO bs.trash_item_det (
+        item_id, parent_item_id,
+        amnt_in_gel, amnt_in_m3, kwh_item_id,
+        enter_date,
+        cat_coeff_id, start_date, end_date,
+        cust_det_id, subs_det_id, subs_count
+      ) VALUES (
+        l_charge_item, null,
+        l_gel, 0, item.itemkey,
+        SYSDATE,
+        null, null, null,
+        null, null, null
+      );
+
+      l_charge_total := ROUND( l_charge_total + l_gel , 2 );
+      l_charge_total_kwh := l_charge_total_kwh + item.kwt;
+    END IF;
+  END LOOP;
+
+  IF l_charge_item IS NOT NULL
+  THEN
+
+    UPDATE bs.trashitem SET
+      amount = l_charge_total,
+      kwt = l_charge_total_kwh,
+      balance = l_balance
+    WHERE trashitemid = l_charge_item;
+
+    l_subs_cat := has_subsidy_50_in_period(p_itemdate, p_customer, l_prev_cycle_last_itemdate, p_itemdate);
+    IF l_subs_cat = 1 -- 50%
+    THEN
+      l_subsidy_50_total_kwh := l_subsidy_50_total_kwh + l_charge_total_kwh;
+      l_subsidy_50_total_gel := ROUND( l_subsidy_50_total_gel + 0.5 * calc_standard_gel(l_charge_total_kwh, l_prev_cycle_last_itemdate, p_itemdate), 2 );
+    ELSIF l_subs_cat = 2 -- 50%, new (2011)
+    THEN
+      l_subsidy_50_total_kwh_2011 := l_subsidy_50_total_kwh_2011 + l_charge_total_kwh;
+    END IF;
+
+    l_balance := l_balance + l_charge_total;
+
+    -- @since August 12, 2011: old/tech customer balances MUST be updated here
+    UPDATE bs.trashcustomer
+    SET
+      balance      = l_balance,
+      curr_balance = l_balance - l_old_balance,
+      old_balance  = l_old_balance,
+      tech_balance = l_tech_balance
+    WHERE
+      custkey = p_customer;
+
+  END IF;
+
+  -- B: loop on corrections
+
+  l_correction_total := 0;
+  l_correction_total_kwh := 0;
+  FOR item IN (
+    SELECT it.*, bop.trash_category FROM bs.item it
+    INNER JOIN bs.billoperation bop ON it.billoperkey = bop.billoperkey
+    WHERE it.acckey = p_account AND
+      it.itemkey > l_prev_cycle_last_item AND
+      bop.trash_category IN (BOP_CATEGORY_CORRECTION, BOP_CATEGORY_CORR_01NOV2012)
+  ) LOOP
+
+    -- kvela arasistemuri vaucher 01-Nov-2012-dan unda ikos gamotovebuli
+    -- (isini unda setanili ikos vaucheris programis gavlit)
+    IF item.trash_category = BOP_CATEGORY_CORR_01NOV2012 AND item.itemdate >= TARIFF_FROM_2012
+      AND item.itemnumber != 'sys' AND item.itemnumber NOT LIKE 'prnt%'
+    THEN
+      l_continue := FALSE;
+    ELSE
+      l_continue := NOT item_is_processed(item.ITEMKEY);
+    END IF;
+
+    IF l_continue
+    THEN
+      IF l_correction_item IS NULL
+      THEN
+        INSERT INTO bs.trashitem (
+          operdate, enterdate, custkey,
+          operationid, amount,
+          balance, old_balance, tech_balance,
+          assistantid, signid, isprinted
+        ) VALUES (
+          p_itemdate, sysdate, p_customer,
+          OPER_CHARGE_CORR_AFTER_2011, 0,
+          l_balance, l_old_balance, l_tech_balance,
+          1, 1, 0
+        ) RETURNING trashitemid INTO l_correction_item;
+      END IF;
+
+      l_gel := 0;
+      l_kwh := 0;
+
+      -- 1: sys vouchers
+      IF item.itemnumber = 'sys' -- system correction
+      THEN
+        FOR corr IN (SELECT * FROM bs.sys_voucher_det_for_trash WHERE voucher_id = item.itemkey)
+        LOOP
+        
+          -- subsidy condideration
+          l_subs_cat := has_subsidy_50_in_period(p_itemdate, p_customer, corr.d1, corr.d2);
+          IF l_subs_cat > 0
+          THEN
+            IF corr.cat = 0 -- discharge
+            THEN
+              IF l_subs_cat = 1
+              THEN
+                l_subsidy_50_total_kwh := l_subsidy_50_total_kwh - corr.kwh;
+                l_subsidy_50_total_gel := ROUND( l_subsidy_50_total_gel - 0.5 * calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+              ELSIF l_subs_cat = 2
+              THEN
+                l_subsidy_50_total_kwh_2011 := l_subsidy_50_total_kwh_2011 - corr.kwh;
+              END IF;
+            ELSE
+              IF l_subs_cat = 1
+              THEN
+                l_subsidy_50_total_kwh := l_subsidy_50_total_kwh + corr.kwh;
+                l_subsidy_50_total_gel := ROUND( l_subsidy_50_total_gel + 0.5 * calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+              ELSIF l_subs_cat = 2
+              THEN
+                l_subsidy_50_total_kwh_2011 := l_subsidy_50_total_kwh_2011 + corr.kwh;
+              END IF;
+            END IF;
+          END IF;
+
+          -- calculate GEL for the period
+          IF corr.cat = 0 -- DISCHARGE
+          THEN
+            l_kwh := l_kwh - corr.kwh;
+            l_gel := ROUND( l_gel - calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+          ELSE            -- RE-CHARGE
+            l_kwh := l_kwh + corr.kwh;
+            l_gel := ROUND( l_gel + calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+          END IF;
+
+        END LOOP;
+      -- 2: parent sys vouchers
+      ELSIF item.itemnumber LIKE 'prnt%'
+      THEN
+        DECLARE
+          l_conj_operation NUMBER;
+          l_sys_voucher NUMBER;
+          l_src_account NUMBER;
+        BEGIN
+          -- get conjuncted operation
+          l_conj_operation := get_conjunction_for_prnt_corr(item.billoperkey);
+          IF l_conj_operation = -1
+          THEN
+            RAISE_APPLICATION_ERROR(-20000, '[PARENT CORRECTION] cannot get conjucted operation for: ' || item.billoperkey);
+            --RAISE NO_DATA_FOUND;
+          END IF;
+  
+          -- find SYS voucher
+          l_src_account := SUBSTR(item.itemnumber, 5);
+  
+          DECLARE
+            l_itemdate DATE := item.itemdate;
+          BEGIN
+            SELECT itemkey INTO l_sys_voucher
+            FROM bs.item it
+            WHERE
+              it.itemdate = l_itemdate AND
+              billoperkey = l_conj_operation AND
+              acckey = l_src_account;
+          END;
+  
+          FOR corr IN (SELECT * FROM sys_voucher_det_for_trash WHERE voucher_id = l_sys_voucher)
+          LOOP
+
+            -- subsidy consideration
+            l_subs_cat := has_subsidy_50_in_period(p_itemdate, p_customer, corr.d1, corr.d2);
+            IF l_subs_cat > 0
+            THEN
+              IF corr.cat = 0 -- discharge
+              THEN
+                IF l_subs_cat = 1
+                THEN
+                  l_subsidy_50_total_kwh := l_subsidy_50_total_kwh + corr.kwh;
+                  l_subsidy_50_total_gel := ROUND( l_subsidy_50_total_gel + 0.5 * calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+                ELSIF l_subs_cat = 2
+                THEN
+                  l_subsidy_50_total_kwh_2011 := l_subsidy_50_total_kwh_2011 + corr.kwh;
+                END IF;
+              ELSE
+                IF l_subs_cat = 1
+                THEN
+                  l_subsidy_50_total_kwh := l_subsidy_50_total_kwh - corr.kwh;
+                  l_subsidy_50_total_gel := ROUND( l_subsidy_50_total_gel - 0.5 * calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+                ELSIF l_subs_cat = 2
+                THEN
+                  l_subsidy_50_total_kwh_2011 := l_subsidy_50_total_kwh_2011 - corr.kwh;
+                END IF;
+              END IF;
+            END IF;
+
+            -- calculate GEL for the period
+            IF corr.cat = 0 -- DISCHARGE
+            THEN
+              l_kwh := l_kwh + corr.kwh;
+              l_gel := l_gel + ROUND( calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+            ELSE            -- RE-CHARGE
+              l_kwh := l_kwh - corr.kwh;
+              l_gel := l_gel - ROUND( calc_standard_gel(corr.kwh, corr.d1, corr.d2), 2 );
+            END IF;
+
+          END LOOP;
+        EXCEPTION WHEN NO_DATA_FOUND
+        THEN
+          -- XXX: pass silently
+          -- NULL;
+          
+          -- XXX: consider as a full period
+          l_kwh := item.kwt;
+          l_gel := ROUND( calc_standard_gel(item.kwt, l_prev_cycle_last_itemdate, p_itemdate), 2 );
+
+        END;
+      -- 3: common correction
+      ELSE
+
+        -- consider as a full period
+        l_kwh := item.kwt;
+
+        -- XXX: standartuli vaucherebi unda gadaangarisdes 5 tetrze!!
+        --l_gel := calc_standard_gel(item.kwt, l_prev_cycle_last_itemdate, p_itemdate);
+        l_gel := ROUND( item.kwt * GEL_PER_KWH_2011, 2 );
+
+      END IF;
+
+      l_correction_total := ROUND( l_correction_total + l_gel, 2 );
+      l_correction_total_kwh := l_correction_total_kwh + l_kwh;
+
+    END IF;
+
+  END LOOP;
+
+  IF l_correction_item IS NOT NULL
+  THEN
+    UPDATE bs.trashitem SET
+      amount  = l_correction_total,
+      kwt     = l_correction_total_kwh,
+      balance = l_balance
+    WHERE trashitemid = l_correction_item;
+
+    l_balance := l_balance + l_correction_total;
+
+    -- @since August 12, 2011: old/tech customer balances MUST be updated here
+    UPDATE bs.trashcustomer
+    SET
+      balance      = l_balance,
+      curr_balance = l_balance - l_old_balance,
+      old_balance  = l_old_balance,
+      tech_balance = l_tech_balance
+    WHERE
+      custkey = p_customer;
+  END IF;
+
+  -- C: processing 50% subsidy
+
+  IF ABS(l_subsidy_50_total_kwh) > 0
+  THEN
+    -- l_gel := ROUND( -0.5 * l_subsidy_50_total_kwh * GEL_PER_KWH_2011 , 2 );
+    -- l_gel := -0.5 * calc_standard_gel(l_subsidy_50_total_kwh, l_prev_cycle_last_itemdate, p_itemdate);
+    l_gel := - l_subsidy_50_total_gel;
+    INSERT INTO bs.trashitem (
+      operdate, enterdate, custkey,
+      operationid, amount, kwt,
+      balance, old_balance, tech_balance,
+      assistantid, signid, isprinted
+    ) VALUES (
+      p_itemdate, sysdate, p_customer,
+      OPER_SUBSIDY_50_PERCENT, l_gel, -l_subsidy_50_total_kwh,
+      l_balance, l_old_balance, l_tech_balance,
+      1, 1, 0
+    ) RETURNING TRASHITEMID INTO l_subsidy_50_item;
+
+    UPDATE bs.trashitem SET balance = l_balance WHERE trashitemid = l_subsidy_50_item;
+
+    l_balance := l_balance + l_gel;
+
+    -- @since August 12, 2011: old/tech customer balances MUST be updated here
+    UPDATE bs.trashcustomer
+    SET
+      balance      = l_balance,
+      curr_balance = l_balance - l_old_balance,
+      old_balance  = l_old_balance,
+      tech_balance = l_tech_balance
+    WHERE
+      custkey = p_customer;
+  END IF;
+
+  -- D: processing 50% subsidy (2011)
+
+  IF ABS(l_subsidy_50_total_kwh_2011) > 0
+  THEN
+    l_gel := ROUND( -0.5 * l_subsidy_50_total_kwh_2011 * GEL_PER_KWH_2011, 2 );
+    -- l_gel := -0.5 * calc_standard_gel(l_subsidy_50_total_kwh_2011, l_prev_cycle_last_itemdate, p_itemdate);
+    INSERT INTO bs.trashitem (
+      operdate, enterdate, custkey,
+      operationid, amount, kwt,
+      balance, old_balance, tech_balance,
+      assistantid, signid, isprinted
+    ) VALUES (
+      p_itemdate, sysdate, p_customer,
+      OPER_SUBSIDY_50_PERCENT_2011, l_gel, -l_subsidy_50_total_kwh_2011,
+      l_balance, l_old_balance, l_tech_balance,
+      1, 1, 0
+    ) RETURNING TRASHITEMID INTO l_subsidy_50_item_2011;
+
+    UPDATE bs.trashitem SET balance = l_balance WHERE trashitemid = l_subsidy_50_item_2011;
+
+    l_balance := l_balance + l_gel;
+
+    -- @since August 12, 2011: old/tech customer balances MUST be updated here
+    UPDATE bs.trashcustomer
+    SET
+      balance      = l_balance,
+      curr_balance = l_balance - l_old_balance,
+      old_balance  = l_old_balance,
+      tech_balance = l_tech_balance
+    WHERE
+      custkey = p_customer;
+  END IF;
+
+END;
+
+FUNCTION get_customer_category (p_customer NUMBER, l_billing_category NUMBER)  RETURN NUMBER IS
+  l_category NUMBER;
+BEGIN
+
+  SELECT trash_cust_cat_id INTO l_category
+  FROM (
+    SELECT
+      -- #1. Monthly summary category Id
+      CASE
+      WHEN --OLD: u.cat_id = cat_common
+        u.id = CUM_RESIDENT_JAN2007 OR
+        u.id = CUM_RESIDENT_MAR2011
+      THEN
+        -- residential
+        MONSUM_RESIDENTIAL_CATEGORY
+      ELSE
+        -- comercial
+        MONSUM_COMERCIAL_CATEGORY
+      END trash_cust_cat_id
+    FROM bs.trash_cust_det det INNER JOIN bs.trash_cat_units u ON det.cat_unit_id = u.ID
+    WHERE 
+      det.customer_id = p_customer AND
+      det.start_date <= TRUNC(SYSDATE)
+    ORDER BY
+      det.status ASC, det.ID DESC
+  ) WHERE ROWNUM = 1;
+
+  RETURN l_category;
+
+EXCEPTION WHEN NO_DATA_FOUND
+THEN
+
+  IF l_billing_category IN (1, 1111, 1112, 1113)
+  THEN
+    RETURN MONSUM_RESIDENTIAL_CATEGORY;
+  END IF;
+
+  RETURN MONSUM_NOTDEFINED_CATEGORY;
+
+END;
+
+-- this procedure accepts both (cycle and non-cycle) statuses of trash customer charging
+PROCEDURE process_all(p_account NUMBER, p_itemdate DATE, p_schedule NUMBER)
+IS
+  l_customer NUMBER;
+  l_mainacc  NUMBER;
+  l_category NUMBER;
+  l_billing_category NUMBER;
+  l_billing_activity NUMBER;
+  l_status NUMBER;
+BEGIN
+
+  IF p_itemdate < bill_manager_2006.DATE_TRASH_JOIN
+  THEN
+    RETURN;
+  END IF;
+
+  -- get account information
+  SELECT
+    custkey, mainaccount INTO l_customer, l_mainacc
+  FROM
+    bs.account
+  WHERE
+    acckey = p_account;
+
+---------------- TODO_1: remove this after JAN, 2013
+dimitri.trash_operation_131.process_customer(l_customer, p_itemdate);
+---------------- END of TODO_1
+
+  -- get trashcustomer status
+  BEGIN
+    SELECT status INTO l_status
+    FROM bs.trashcustomer WHERE custkey = l_customer;
+    IF l_status = 3
+    THEN
+      RETURN;
+    END IF;
+  EXCEPTION WHEN NO_DATA_FOUND
+  THEN
+    NULL;
+  END;
+
+  -- get customer category
+  SELECT custcatkey, activity INTO l_billing_category, l_billing_activity
+  FROM bs.customer where custkey = l_customer;
+
+  -- SuqniSani, Sadrevani, wyalsaqaCi, tumbo, interneti, sabalanso
+  -- IF l_billing_activity IN (175, 193, 22, 147, 208, 55)
+  -- @since 22-Feb-2012 // remove 22 (wyalsaqaCi) from the list
+  IF l_billing_activity IN (175, 193, 147, 208, 55)
+  THEN
+    RETURN;
+  END IF;
+
+  -- get trash customer category
+  l_category := get_customer_category(l_customer, l_billing_category);
+
+  -- A: commercial category
+  IF l_category = MONSUM_COMERCIAL_CATEGORY
+  THEN
+
+    -- EXIT!!!
+    -- if the given account is not a main account, then we should exit this procedure.
+    -- only main account is charged when in comercial category.
+    IF l_mainacc != 1 OR p_schedule IS NULL
+    THEN
+      RETURN;
+    END IF;
+
+    -- process regular trash charge
+    DECLARE
+      l_month TP_MONTH;
+    BEGIN
+      getMonth(TRUNC(ADD_MONTHS(p_itemdate, -1)), l_month);
+      runRegularTrash_cust(l_customer, l_month, p_itemdate);
+    END;
+
+  -- B: residential category
+  ELSIF l_category = MONSUM_RESIDENTIAL_CATEGORY
+  THEN
+
+    IF l_billing_category != 1120
+    THEN
+      process_kwh_on_account(l_customer, p_account, p_itemdate, p_schedule);
+    END IF;
+
+  END IF;
+
+END;
+
+PROCEDURE process_not_cycle(p_account NUMBER, p_itemdate DATE)
+IS
+BEGIN
+  NULL;
+  --process_all(p_account, NVL(p_itemdate, sysdate), null);
+END;
+
+PROCEDURE process_cycle(p_account NUMBER, p_itemdate DATE, p_schedule NUMBER)
+IS
+BEGIN
+  process_all(p_account, p_itemdate, p_schedule);
+END;
 
 --------------------------------------------------------------------------------
 -- Tests
@@ -3222,6 +4063,22 @@ BEGIN
 
 END;
 
+PROCEDURE test_standard_tariff
+IS
+BEGIN
+
+  assert_equals(5.00,  calc_standard_gel(100, null, null));
+  assert_equals(2.50,  calc_standard_gel(100, '01-Jan-2013', '31-Jan-2013'));
+  assert_equals(2.50,  calc_standard_gel(100, '01-Nov-2012', '01-Nov-2012'));
+  assert_equals(5.00,  calc_standard_gel(100, '31-Oct-2012', '31-Oct-2012'));
+  assert_equals(2.50,  calc_standard_gel(100, '31-Oct-2012', '01-Nov-2012'));
+  assert_equals(3.33,  calc_standard_gel(100, '30-Oct-2012', '02-Nov-2012'));
+  assert_equals(2.50,  calc_standard_gel(100, '31-Oct-2012', '03-Nov-2012'));
+  assert_equals(13.91, calc_standard_gel(301, '3-Oct-2012', '5-Nov-2012'));
+  assert_equals(5.00,  calc_standard_gel(100, '1-Apr-2013', '30-Apr-2013'));
+
+END;
+
 /**
  * All tests.
  */
@@ -3231,9 +4088,9 @@ BEGIN
 
   test_appendDateSortedAndUnique;
   test_findIntersection;
+  test_standard_tariff;
 
 END test_all;
 
 END trash_manager_2007_2;
-/
 
